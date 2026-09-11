@@ -1,0 +1,78 @@
+name: Agent evaluation
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: Run the paid Claude Code scenarios
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.13"
+      - name: Sync locked development environment
+        run: uv sync --frozen
+      - name: Run deterministic tests
+        env:
+          MLFLOW_DISABLE_AGENT_HINT: "1"
+        run: uv run pytest -q
+      - name: Validate reconstructed tool tracing
+        env:
+          MLFLOW_DISABLE_AGENT_HINT: "1"
+        run: uv run python -m scripts.validate_agent_tracing
+
+  live-agent:
+    needs: harness
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_live)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CANON_AGENT_MODEL: ${{ vars.CANON_AGENT_MODEL || 'haiku' }}
+      CANON_AGENT_MAX_BUDGET_USD: "0.50"
+      CANON_RUN_AGENT_EVAL: "1"
+      JUDGE_MODEL: ${{ vars.CANON_JUDGE_MODEL || 'anthropic:/claude-haiku-4-5-20251001' }}
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.13"
+      - name: Sync locked development environment
+        run: uv sync --frozen
+      - name: Install pinned Claude Code
+        run: npm install --global @anthropic-ai/claude-code@2.1.221
+      - name: Verify required credential
+        run: test -n "$ANTHROPIC_API_KEY"
+      - name: Prepare MLflow dataset and scorers
+        run: |
+          uv run python -m scripts.list_datasets
+          uv run python -m scripts.create_agent_eval_dataset
+          uv run python -m scripts.register_agent_eval_scorers --model "$JUDGE_MODEL"
+          uv run python -m scripts.validate_agent_environment
+      - name: Run live agent regression gate
+        run: uv run pytest -q tests/regression/test_canon_agent.py
+      - name: Upload MLflow evaluation records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canon-agent-evaluation-${{ github.run_id }}
+          path: .canon/eval/
+          retention-days: 14
