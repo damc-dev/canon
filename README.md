@@ -79,14 +79,13 @@ Most sessions should require no knowledge-management work. Canon should be notic
 
 Requirements:
 
-- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
 - Claude Code with plugin and MCP support
-- The MCP Python SDK
 
-Install the runtime dependency:
+Create the project environment from the committed lockfile:
 
 ```bash
-python3 -m pip install "mcp>=2,<3"
+uv sync --frozen
 ```
 
 Load the plugin directly during development:
@@ -95,7 +94,7 @@ Load the plugin directly during development:
 claude --plugin-dir /absolute/path/to/canon
 ```
 
-The plugin uses `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json`, so the bundled local server remains portable when the plugin is installed elsewhere.
+The plugin uses `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and starts the bundled server with `uv run --frozen`, so dependencies come from the committed lockfile and the plugin remains portable when installed elsewhere.
 
 ## Initialize a project
 
@@ -247,7 +246,7 @@ The plugin also includes `/canon-init` for additive project setup.
 Run the dependency-free core tests:
 
 ```bash
-python3 -m unittest discover -s tests -p "test_*.py"
+uv run --frozen python -m unittest discover -s tests -p "test_*.py"
 ```
 
 The tests cover classification, generated-content demotion, proposal isolation, index rebuilding, ancestor inheritance, sibling isolation, scope-aware supersession, historical retrieval, and protection against AI-generated supersession.
@@ -255,10 +254,12 @@ The tests cover classification, generated-content demotion, proposal isolation, 
 Validate JSON and compile the Python sources:
 
 ```bash
-python3 -m json.tool .claude-plugin/plugin.json >/dev/null
-python3 -m json.tool .mcp.json >/dev/null
-python3 -m compileall -q server tests
+uv run --frozen python -m json.tool .claude-plugin/plugin.json >/dev/null
+uv run --frozen python -m json.tool .mcp.json >/dev/null
+uv run --frozen python -m compileall -q server tests
 ```
+
+After changing project dependencies, refresh and commit the lockfile with `uv lock`.
 
 ## Deliberate limits
 

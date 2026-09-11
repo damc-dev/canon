@@ -1,9 +1,13 @@
 {
   "mcpServers": {
     "canon": {
-      "command": "python3",
+      "command": "uv",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/server/canon_mcp.py"
+        "run",
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "--frozen",
+        "canon-mcp"
       ]
     }
   }
