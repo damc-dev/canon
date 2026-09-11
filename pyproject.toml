@@ -21,3 +21,12 @@ packages = ["server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["-p", "mlflow.pytest.plugin"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "anthropic>=0.70,<1",
+    "mlflow>=3.14,<4",
+    "pytest>=8,<10",
+]

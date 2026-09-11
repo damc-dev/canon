@@ -94,7 +94,7 @@ Load the plugin directly during development:
 claude --plugin-dir /absolute/path/to/canon
 ```
 
-The plugin uses `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and starts the bundled server with `uv run --frozen`, so dependencies come from the committed lockfile and the plugin remains portable when installed elsewhere.
+The plugin uses `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and starts the bundled server with `uv run --project ... --frozen`, so dependencies come from the committed lockfile without changing the Claude project working directory. The plugin remains portable when installed elsewhere.
 
 ## Initialize a project
 
@@ -260,6 +260,72 @@ uv run --frozen python -m compileall -q server tests
 ```
 
 After changing project dependencies, refresh and commit the lockfile with `uv lock`.
+
+## Coding-agent evaluation
+
+Canon includes an opt-in MLflow harness for testing the real Claude Code plugin
+against isolated repositories. Scenario inputs and expectations live in an MLflow
+GenAI dataset; only opaque fixture workspaces are exposed to the agent. Each run
+captures Claude's response, Canon tool calls, a complete filesystem inventory,
+the Git diff, and hidden acceptance checks.
+
+The harness uses a local SQLite-backed MLflow experiment by default under
+`.canon/eval/`. Set `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERIMENT_NAME` to use a
+shared tracking server instead.
+
+Discover existing datasets before creating or updating the golden suite:
+
+```bash
+uv run python -m scripts.list_datasets
+uv run python -m scripts.create_agent_eval_dataset
+```
+
+Register the three reusable scorers. Choose a judge model that is available in
+your environment:
+
+```bash
+uv run python -m scripts.register_agent_eval_scorers \
+  --model anthropic:/claude-haiku-4-5-20251001
+```
+
+Validate that reconstructed Claude tool calls appear as child `TOOL` spans in a
+single MLflow trace:
+
+```bash
+uv run python -m scripts.validate_agent_tracing
+```
+
+Check the local dataset, scorer registration, Claude installation, and
+authentication before spending model calls:
+
+```bash
+uv run python -m scripts.validate_agent_environment
+```
+
+After authenticating Claude Code, run the complete dataset evaluation:
+
+```bash
+uv run python -m scripts.run_agent_evaluation
+```
+
+For a pull-request-style binary regression gate, enable the paid agent suite
+explicitly:
+
+```bash
+CANON_RUN_AGENT_EVAL=1 uv run pytest tests/regression/test_canon_agent.py
+```
+
+Useful controls are `CANON_AGENT_MODEL`, `CANON_AGENT_MAX_BUDGET_USD`, and
+`CANON_AGENT_TIMEOUT_SECONDS`. The runner disables Bash and network tools,
+uses an explicit Canon MCP configuration, and never passes scenario expectations
+to the coding agent.
+
+The `Agent evaluation` GitHub workflow runs deterministic harness tests on pull
+requests. Its paid regression job runs only on the nightly schedule or an
+explicit workflow dispatch with `run_live` enabled. Configure
+`ANTHROPIC_API_KEY`; optional repository variables `CANON_AGENT_MODEL` and
+`CANON_JUDGE_MODEL` override the pinned defaults. MLflow records are uploaded
+from every live job for post-failure inspection.
 
 ## Deliberate limits
 
