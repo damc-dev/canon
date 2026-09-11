@@ -267,7 +267,7 @@ Canon includes an opt-in MLflow harness for testing the real Claude Code plugin
 against isolated repositories. Scenario inputs and expectations live in an MLflow
 GenAI dataset; only opaque fixture workspaces are exposed to the agent. Each run
 captures Claude's response, Canon tool calls, a complete filesystem inventory,
-the Git diff, and hidden acceptance checks.
+the Git diff (including newly created files), and hidden acceptance checks.
 
 The harness uses a local SQLite-backed MLflow experiment by default under
 `.canon/eval/`. Set `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERIMENT_NAME` to use a

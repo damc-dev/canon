@@ -160,9 +160,31 @@ class AgentEvalHarnessTests(unittest.TestCase):
 
         result = execute_scenario("s001", "bad control", invoker=bad_invoker)
         self.assertFalse(result["acceptance"]["passed"])
+        self.assertIn("+Platform: Kubernetes on AKS", result["git_diff"])
+        self.assertEqual(result["git_status"], ["?? deployment-plan.md"])
         feedback = scenario_acceptance(outputs=result)
         self.assertIs(feedback.value, False)
         self.assertIn("uses_active_decision", feedback.rationale)
+
+    def test_diff_lists_baseline_changes_before_created_files(self) -> None:
+        def mixed_invoker(workspace: Path, _task: str, _plugin: Path, _mcp: Path):
+            (workspace / "a-large-plan.md").write_text("x\n" * 50, encoding="utf-8")
+            decision = workspace / "knowledge" / "decisions" / "runtime.md"
+            decision.write_text(
+                decision.read_text(encoding="utf-8").replace("Azure Container Apps", "AKS"),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(
+                args=["fake-agent"], returncode=0, stdout="", stderr=""
+            )
+
+        result = execute_scenario("s001", "task", invoker=mixed_invoker)
+        diff = result["git_diff"]
+        self.assertIn("+Deploy the payments API to AKS.", diff)
+        self.assertIn("new file mode", diff)
+        self.assertLess(
+            diff.index("knowledge/decisions/runtime.md"), diff.index("a-large-plan.md")
+        )
 
     def test_acceptance_scorer_fails_on_agent_errors(self) -> None:
         passing = {"acceptance": {"passed": True, "checks": {}}}

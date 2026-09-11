@@ -301,6 +301,18 @@ def _initialize_git(workspace: Path) -> None:
     )
 
 
+def _capture_diff(workspace: Path) -> str:
+    """Diff every non-ignored change, including files the agent created.
+
+    New files are marked intent-to-add so they appear in the diff. Changes to
+    baseline files come first so large new files cannot truncate them away.
+    """
+    _run_git(workspace, "add", "--intent-to-add", "--all")
+    changed = _run_git(workspace, "diff", "--no-ext-diff", "--diff-filter=a", "--").stdout
+    created = _run_git(workspace, "diff", "--no-ext-diff", "--diff-filter=A", "--").stdout
+    return changed + created
+
+
 def _invoke_claude(
     workspace: Path, task: str, plugin_root: Path, mcp_config: Path
 ) -> subprocess.CompletedProcess[str]:
@@ -371,7 +383,7 @@ def execute_scenario(
         parsed = parse_claude_stream(stdout)
         after = inventory_files(workspace)
         status = _run_git(workspace, "status", "--short").stdout
-        diff = _run_git(workspace, "diff", "--no-ext-diff", "--").stdout
+        diff = _capture_diff(workspace)
         acceptance = _run_acceptance(acceptance_path, workspace)
 
         return {
