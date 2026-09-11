@@ -4,21 +4,16 @@ import argparse
 import os
 
 from mlflow.genai.judges import make_judge
-from mlflow.genai.scorers import ToolCallCorrectness, list_scorers
+from mlflow.genai.scorers import delete_scorer, list_scorers
 
 from scripts.agent_eval_config import configure_mlflow
+from scripts.agent_eval_harness import RETIRED_SCORERS
 
 
 def build_scorers(model: str | None):
+    # Tool-call correctness is checked deterministically by canon_required_tool_call,
+    # which the harness applies to every evaluation without registration.
     return [
-        ToolCallCorrectness(
-            name="canon_tool_call_correctness",
-            description=(
-                "Checks whether the coding agent selected the appropriate Canon tools and "
-                "passed arguments, including the narrowest scope implied by the task."
-            ),
-            model=model,
-        ),
         make_judge(
             name="canon_authority_compliance",
             description="Checks that the agent's outcome follows effective Canon authority.",
@@ -76,6 +71,10 @@ def main() -> None:
         scorer.register(experiment_id=experiment_id)
         action = "Updated" if registered is not None else "Registered"
         print(f"{action} scorer: {scorer.name}")
+
+    for name in sorted(RETIRED_SCORERS & existing.keys()):
+        delete_scorer(name=name, experiment_id=experiment_id, version="all")
+        print(f"Deleted retired scorer: {name}")
 
 
 if __name__ == "__main__":

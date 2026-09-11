@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -15,6 +16,7 @@ from typing import Any, Callable
 import mlflow
 from mlflow.entities import Feedback, SpanType
 from mlflow.genai.scorers import scorer
+from pandas.api.types import is_bool
 
 from scripts.agent_eval_config import PROJECT_ROOT
 
@@ -33,6 +35,8 @@ ALLOWED_AGENT_TOOLS = ",".join(
     + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
 )
 MAX_CAPTURE_CHARS = 20_000
+# Previously registered judges that the harness replaced with deterministic scorers.
+RETIRED_SCORERS = {"canon_tool_call_correctness"}
 # Judge providers whose credentials can be verified locally from a single environment variable.
 JUDGE_CREDENTIAL_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -258,6 +262,17 @@ def validate_live_agent() -> dict[str, Any]:
     }
 
 
+def validate_scorers(scorers: list[Any]) -> dict[str, str]:
+    """Fail before paid agent runs when registered scorers are stale or cannot authenticate."""
+    retired = sorted(RETIRED_SCORERS & {judge.name for judge in scorers})
+    if retired:
+        raise RuntimeError(
+            f"Retired scorers are still registered: {', '.join(retired)}. Re-run "
+            "`uv run python -m scripts.register_agent_eval_scorers --model <provider:/model>`."
+        )
+    return validate_judge_credentials(scorers)
+
+
 def validate_judge_credentials(scorers: list[Any]) -> dict[str, str]:
     """Fail before an evaluation spends agent runs when a judge cannot authenticate.
 
@@ -480,6 +495,57 @@ def scenario_acceptance(outputs: dict[str, Any] | None) -> Feedback:
     )
 
 
+def _tool_name(name: str) -> str:
+    return name.rsplit("__", 1)[-1]
+
+
+def _canon_calls(outputs: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return (outputs.get("canon_calls") or []) if isinstance(outputs, dict) else []
+
+
+def missing_tool_calls(
+    outputs: dict[str, Any] | None, expectations: dict[str, Any] | None
+) -> list[str]:
+    """Return expected Canon calls the agent never made.
+
+    Extra calls (skills, tool search, follow-up lookups) and extra arguments are allowed;
+    each expected call only needs a matching Canon call with the expected argument values.
+    """
+    actual = _canon_calls(outputs)
+    missing: list[str] = []
+    for expected in (expectations or {}).get("expected_tool_calls") or []:
+        name = _tool_name(expected["name"])
+        arguments = expected.get("arguments") or {}
+        if not any(
+            _tool_name(call["name"]) == name
+            and isinstance(call.get("input"), dict)
+            and all(call["input"].get(key) == value for key, value in arguments.items())
+            for call in actual
+        ):
+            detail = ", ".join(f"{key}={value!r}" for key, value in arguments.items())
+            missing.append(f"{name}({detail})")
+    return missing
+
+
+@scorer(name="canon_required_tool_call")
+def required_tool_call(
+    outputs: dict[str, Any] | None, expectations: dict[str, Any] | None
+) -> Feedback:
+    """Binary gate on the agent calling each expected Canon tool with the expected arguments."""
+    missing = missing_tool_calls(outputs, expectations)
+    if missing:
+        made = [
+            f"{_tool_name(call['name'])}({call.get('input')!r})" for call in _canon_calls(outputs)
+        ]
+        rationale = f"missing Canon call: {'; '.join(missing)}. Canon calls made: {made or 'none'}"
+    else:
+        rationale = "Every expected Canon tool call was made with the expected arguments."
+    return Feedback(value=not missing, rationale=rationale)
+
+
+DETERMINISTIC_SCORERS = [scenario_acceptance, required_tool_call]
+
+
 @mlflow.trace(name="canon_coding_agent_scenario", span_type=SpanType.AGENT)
 def run_scenario(fixture_id: str, task: str) -> dict[str, Any]:
     """MLflow prediction entry point. Its arguments match dataset input keys."""
@@ -500,11 +566,51 @@ def run_scenario(fixture_id: str, task: str) -> dict[str, Any]:
 
 
 def evaluate_scenarios(dataset: Any, scorers: list[Any]):
-    """Run every scenario once with the registered judges plus the deterministic gate."""
+    """Run every scenario once with the registered judges plus the deterministic gates."""
     # MLflow otherwise probes predict_fn with the first record before evaluating, which
     # runs a paid agent scenario twice. run_scenario is already traced, so the probe adds
     # nothing. An explicit caller setting still wins.
     os.environ.setdefault("MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION", "true")
     return mlflow.genai.evaluate(
-        data=dataset, predict_fn=run_scenario, scorers=[*scorers, scenario_acceptance]
+        data=dataset, predict_fn=run_scenario, scorers=[*scorers, *DETERMINISTIC_SCORERS]
     )
+
+
+def _present(value: Any) -> Any:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    return value
+
+
+def _is_passing(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() == "yes"
+    return is_bool(value) and bool(value)
+
+
+def evaluation_failures(result: Any, scorers: list[Any]) -> list[str]:
+    """Return per-scenario failures for the registered judges and the deterministic gates.
+
+    MLflow's EvaluationResult.passed also reads the dataset's expectation columns as scorer
+    values, so any text expectation fails it. Only scorer columns are inspected here, and a
+    scorer that produced no result for a scenario counts as a failure.
+    """
+    frame = result.result_df
+    if frame is None or frame.empty:
+        return ["evaluation produced no results"]
+    names = [judge.name for judge in [*scorers, *DETERMINISTIC_SCORERS]]
+    failures: list[str] = []
+    for _, row in frame.iterrows():
+        request = row.get("request")
+        scenario = request.get("fixture_id") if isinstance(request, dict) else row.get("trace_id")
+        for name in names:
+            error = _present(row.get(f"{name}/error_message"))
+            value = _present(row.get(f"{name}/value"))
+            if error is not None:
+                failures.append(f"{scenario} {name}: {error}")
+            elif value is None:
+                failures.append(f"{scenario} {name}: no result")
+            elif not _is_passing(value):
+                rationale = _present(row.get(f"{name}/rationale"))
+                failures.append(f"{scenario} {name}: {rationale or f'value={value!r}'}")
+    return failures

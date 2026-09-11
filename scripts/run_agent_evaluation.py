@@ -5,8 +5,9 @@ from mlflow.genai.scorers import list_scorers
 from scripts.agent_eval_config import DEFAULT_DATASET_NAME, configure_mlflow, find_dataset
 from scripts.agent_eval_harness import (
     evaluate_scenarios,
-    validate_judge_credentials,
+    evaluation_failures,
     validate_live_agent,
+    validate_scorers,
 )
 
 
@@ -29,14 +30,19 @@ def main() -> None:
             "scripts.register_agent_eval_scorers --model <provider:/model>"
         )
     try:
-        validate_judge_credentials(scorers)
+        validate_scorers(scorers)
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
 
     result = evaluate_scenarios(dataset, scorers)
     print(result)
-    if not result.passed:
-        raise SystemExit(f"Agent evaluation failed.\n{result.reason}")
+    failures = evaluation_failures(result, scorers)
+    if failures:
+        raise SystemExit(
+            f"Agent evaluation failed ({len(failures)}):\n"
+            + "\n".join(f"  - {failure}" for failure in failures)
+        )
+    print("Agent evaluation passed.")
 
 
 if __name__ == "__main__":

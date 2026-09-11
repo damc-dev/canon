@@ -4,7 +4,7 @@ import mlflow
 from mlflow.genai.scorers import list_scorers
 
 from scripts.agent_eval_config import configure_mlflow, find_dataset
-from scripts.agent_eval_harness import validate_judge_credentials, validate_live_agent
+from scripts.agent_eval_harness import validate_live_agent, validate_scorers
 
 
 def main() -> None:
@@ -21,7 +21,7 @@ def main() -> None:
     if not scorers:
         raise SystemExit("Agent environment is incomplete: registered scorers are missing.")
     try:
-        judge_models = validate_judge_credentials(scorers)
+        judge_models = validate_scorers(scorers)
     except RuntimeError as exc:
         raise SystemExit(f"Agent environment is incomplete: {exc}") from exc
 

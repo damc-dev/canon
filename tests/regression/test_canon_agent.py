@@ -9,8 +9,9 @@ from mlflow.genai.scorers import list_scorers
 from scripts.agent_eval_config import DEFAULT_DATASET_NAME, configure_mlflow, find_dataset
 from scripts.agent_eval_harness import (
     evaluate_scenarios,
-    validate_judge_credentials,
+    evaluation_failures,
     validate_live_agent,
+    validate_scorers,
 )
 
 
@@ -26,6 +27,7 @@ def test_canon_agent_golden_scenarios() -> None:
     assert dataset is not None, "Create the agent evaluation dataset first."
     scorers = list_scorers(experiment_id=experiment_id)
     assert scorers, "Register the agent evaluation scorers first."
-    validate_judge_credentials(scorers)
+    validate_scorers(scorers)
     result = evaluate_scenarios(dataset, scorers)
-    assert result.passed, result.reason
+    failures = evaluation_failures(result, scorers)
+    assert not failures, "\n".join(failures)

@@ -9,18 +9,45 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from scripts import run_agent_evaluation
+import pandas as pd
+
+from scripts import register_agent_eval_scorers, run_agent_evaluation
 from scripts.agent_eval_harness import (
+    DETERMINISTIC_SCORERS,
     build_claude_command,
     compare_inventories,
     evaluate_scenarios,
+    evaluation_failures,
     execute_scenario,
     parse_claude_stream,
+    required_tool_call,
     run_scenario,
     scenario_acceptance,
     scenario_failures,
     validate_judge_credentials,
+    validate_scorers,
 )
+
+EXPECTED_GET_CONTEXT = {
+    "expected_tool_calls": [
+        {"name": "mcp__canon__get_context", "arguments": {"scope": "client/acme/project/payments"}}
+    ]
+}
+
+
+def result_table(**overrides) -> SimpleNamespace:
+    """Build an evaluation result row where every scorer passes unless overridden."""
+    row = {
+        "trace_id": "tr-1",
+        "request": {"fixture_id": "s001", "task": "task"},
+        # MLflow mixes dataset expectations into the same `<name>/value` columns.
+        "expected_scope/value": "client/acme/project/payments",
+        "expected_tool_calls/value": EXPECTED_GET_CONTEXT["expected_tool_calls"],
+        "judge/value": True,
+        **{f"{judge.name}/value": True for judge in DETERMINISTIC_SCORERS},
+        **overrides,
+    }
+    return SimpleNamespace(result_df=pd.DataFrame([row]))
 
 
 def stream_for(tool: str, arguments: dict, response: str = "Done") -> str:
@@ -75,6 +102,14 @@ def stream_for(tool: str, arguments: dict, response: str = "Done") -> str:
             ),
         ]
     )
+
+
+def writing_invoker(filename: str, body: str):
+    def invoke(workspace: Path, _task: str, _plugin: Path, _mcp: Path):
+        (workspace / filename).write_text(body, encoding="utf-8")
+        return subprocess.CompletedProcess(args=["fake-agent"], returncode=0, stdout="", stderr="")
+
+    return invoke
 
 
 class AgentEvalHarnessTests(unittest.TestCase):
@@ -271,7 +306,7 @@ class AgentEvalHarnessTests(unittest.TestCase):
             self.assertEqual(evaluate_scenarios("dataset", [judge]), "result")
         self.assertEqual(observed["skip"], "true")
         self.assertIs(observed["predict_fn"], run_scenario)
-        self.assertEqual(observed["scorers"], [judge, scenario_acceptance])
+        self.assertEqual(observed["scorers"], [judge, scenario_acceptance, required_tool_call])
 
         with (
             mock.patch.dict(
@@ -284,7 +319,7 @@ class AgentEvalHarnessTests(unittest.TestCase):
 
     def test_run_agent_evaluation_exit_status(self) -> None:
         judge = SimpleNamespace(name="judge", model="anthropic:/claude-haiku-4-5-20251001")
-        failed = SimpleNamespace(passed=False, reason="judge: SCORER_ERROR")
+        failed = result_table(**{"judge/value": None, "judge/error_message": "SCORER_ERROR"})
         patches = [
             mock.patch.object(run_agent_evaluation, "validate_live_agent"),
             mock.patch.object(run_agent_evaluation, "configure_mlflow", return_value="1"),
@@ -312,7 +347,133 @@ class AgentEvalHarnessTests(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit) as raised:
                 run_agent_evaluation.main()
-        self.assertIn("judge: SCORER_ERROR", str(raised.exception.code))
+        self.assertIn("s001 judge: SCORER_ERROR", str(raised.exception.code))
+
+        with (
+            mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True),
+            mock.patch.object(
+                run_agent_evaluation, "evaluate_scenarios", return_value=result_table()
+            ),
+            mock.patch("builtins.print") as printed,
+        ):
+            run_agent_evaluation.main()
+        printed.assert_called_with("Agent evaluation passed.")
+
+    def test_markdown_formatted_answers_pass_acceptance(self) -> None:
+        cases = {
+            ("s001", "deployment-plan.md"): [
+                "**Platform: Azure Container Apps**",
+                "**Platform:** Azure Container Apps",
+                "- Platform: `Azure Container Apps` (ACA).",
+                "## Platform: Azure Container Apps",
+            ],
+            ("s002", "cloud-plan.md"): [
+                "**Provider:** Microsoft Azure",
+                "* __Provider__: Azure",
+            ],
+        }
+        for (fixture_id, filename), lines in cases.items():
+            for line in lines:
+                with self.subTest(fixture_id=fixture_id, line=line):
+                    result = execute_scenario(
+                        fixture_id, "task", invoker=writing_invoker(filename, f"# Plan\n\n{line}\n")
+                    )
+                    self.assertTrue(result["acceptance"]["passed"], result["acceptance"])
+
+    def test_missing_or_conflicting_answers_fail_every_selection_check(self) -> None:
+        cases = {
+            ("s001", "deployment-plan.md", "rejects_conflicting_reference"): [
+                "No platform line.",
+                "**Platform:** Azure Kubernetes Service (AKS)",
+            ],
+            ("s002", "cloud-plan.md", "excludes_sibling_decision"): [
+                "No provider line.",
+                "Provider: AWS Lambda with API Gateway",
+            ],
+        }
+        for (fixture_id, filename, check), bodies in cases.items():
+            for body in bodies:
+                with self.subTest(fixture_id=fixture_id, body=body):
+                    result = execute_scenario(
+                        fixture_id, "task", invoker=writing_invoker(filename, body)
+                    )
+                    self.assertFalse(result["acceptance"]["checks"][check])
+                    self.assertFalse(result["acceptance"]["passed"])
+
+    def test_required_tool_call_allows_extra_calls_and_arguments(self) -> None:
+        def outputs(*calls: tuple[str, dict]) -> dict:
+            return {"canon_calls": [{"name": name, "input": args} for name, args in calls]}
+
+        passing = outputs(
+            ("mcp__canon__search_knowledge", {"query": "cloud"}),
+            ("mcp__canon__get_context", {"task": "t", "scope": "client/acme/project/payments"}),
+        )
+        self.assertIs(
+            required_tool_call(outputs=passing, expectations=EXPECTED_GET_CONTEXT).value, True
+        )
+
+        failing = {
+            "wrong scope": outputs(("mcp__canon__get_context", {"scope": "client/acme"})),
+            "wrong tool": outputs(
+                ("mcp__canon__search_knowledge", {"scope": "client/acme/project/payments"})
+            ),
+            "no calls": outputs(),
+            "no outputs": None,
+        }
+        for label, value in failing.items():
+            with self.subTest(label=label):
+                feedback = required_tool_call(outputs=value, expectations=EXPECTED_GET_CONTEXT)
+                self.assertIs(feedback.value, False)
+                self.assertIn("get_context(scope='client/acme/project/payments')", feedback.rationale)
+
+    def test_evaluation_failures_ignore_expectation_columns(self) -> None:
+        judge = SimpleNamespace(name="judge")
+        self.assertEqual(evaluation_failures(result_table(), [judge]), [])
+        self.assertEqual(evaluation_failures(result_table(**{"judge/value": "yes"}), [judge]), [])
+
+        cases = {
+            "judge rationale": {"judge/value": False, "judge/rationale": "judge rationale"},
+            "value='no'": {"judge/value": "no"},
+            "SCORER_ERROR": {"judge/value": None, "judge/error_message": "SCORER_ERROR"},
+            "no result": {"judge/value": float("nan")},
+        }
+        for expected, overrides in cases.items():
+            with self.subTest(expected=expected):
+                failures = evaluation_failures(result_table(**overrides), [judge])
+                self.assertEqual(len(failures), 1)
+                self.assertIn(f"s001 judge: {expected}", failures[0])
+
+        missing_column = result_table()
+        missing_column.result_df = missing_column.result_df.drop(columns="judge/value")
+        self.assertEqual(evaluation_failures(missing_column, [judge]), ["s001 judge: no result"])
+        self.assertEqual(
+            evaluation_failures(SimpleNamespace(result_df=None), [judge]),
+            ["evaluation produced no results"],
+        )
+
+    def test_retired_scorers_are_rejected_and_deleted(self) -> None:
+        retired = SimpleNamespace(name="canon_tool_call_correctness", model=None)
+        with self.assertRaises(RuntimeError) as raised:
+            validate_scorers([retired])
+        self.assertIn("register_agent_eval_scorers", str(raised.exception))
+
+        registered = [retired, SimpleNamespace(name="canon_authority_compliance")]
+        with (
+            mock.patch.object(register_agent_eval_scorers, "configure_mlflow", return_value="1"),
+            mock.patch.object(register_agent_eval_scorers, "list_scorers", return_value=registered),
+            mock.patch.object(register_agent_eval_scorers, "delete_scorer") as delete,
+            mock.patch.object(register_agent_eval_scorers, "build_scorers", return_value=[]),
+            mock.patch("sys.argv", ["register", "--model", "anthropic:/model"]),
+            mock.patch("builtins.print"),
+        ):
+            register_agent_eval_scorers.main()
+        delete.assert_called_once_with(
+            name="canon_tool_call_correctness", experiment_id="1", version="all"
+        )
+        self.assertNotIn(
+            "canon_tool_call_correctness",
+            {judge.name for judge in register_agent_eval_scorers.build_scorers("anthropic:/m")},
+        )
 
     def test_invalid_fixture_identifier_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

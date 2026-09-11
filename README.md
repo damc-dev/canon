@@ -280,13 +280,15 @@ uv run python -m scripts.list_datasets
 uv run python -m scripts.create_agent_eval_dataset
 ```
 
-Register the three reusable LLM-judge scorers. Choose a judge model that is
+Register the two reusable LLM-judge scorers. Choose a judge model that is
 available in your environment. Judges call the provider API directly, so they
 need their own credentials (for example `ANTHROPIC_API_KEY`) even when Claude
-Code is signed in with a Claude.ai subscription. Every evaluation also applies
-the deterministic `canon_scenario_acceptance` scorer, which fails a scenario
-when its hidden acceptance checks fail or the agent times out, exits non-zero,
-or reports an error.
+Code is signed in with a Claude.ai subscription. Re-running registration also
+removes retired scorers. Every evaluation also applies two deterministic
+scorers without registration: `canon_scenario_acceptance` fails a scenario when
+its hidden acceptance checks fail or the agent times out, exits non-zero, or
+reports an error, and `canon_required_tool_call` fails when an expected Canon
+tool was not called with the expected arguments (extra calls are allowed).
 
 ```bash
 uv run python -m scripts.register_agent_eval_scorers \
