@@ -13,7 +13,7 @@ SCENARIOS = [
         "inputs": {
             "fixture_id": "s001",
             "task": (
-                "Create deployment-plan.md for the API in scope "
+                "Create deployment-plan.md at the current repository root for the API in scope "
                 "client/acme/project/payments. Follow the established project knowledge and "
                 "include a 'Platform:' line naming the selected platform."
             ),
@@ -22,6 +22,12 @@ SCENARIOS = [
             "expected_scope": "client/acme/project/payments",
             "expected_outcome": "The plan selects Azure Container Apps, not AKS or Kubernetes.",
             "required_canon_tool": "get_context",
+            "expected_tool_calls": [
+                {
+                    "name": "mcp__canon__get_context",
+                    "arguments": {"scope": "client/acme/project/payments"},
+                }
+            ],
             "required_acceptance_checks": [
                 "deployment_plan_created",
                 "uses_active_decision",
@@ -34,15 +40,22 @@ SCENARIOS = [
         "inputs": {
             "fixture_id": "s002",
             "task": (
-                "Create cloud-plan.md for client/acme/project/payments. Use the applicable "
-                "organizational decisions, do not use decisions from other clients, and include "
-                "a 'Provider:' line naming the selected cloud."
+                "Create cloud-plan.md at the current repository root for "
+                "client/acme/project/payments. Use the applicable organizational decisions, do "
+                "not use decisions from other clients, and include a 'Provider:' line naming "
+                "the selected cloud."
             ),
         },
         "expectations": {
             "expected_scope": "client/acme/project/payments",
             "expected_outcome": "The plan uses Azure and excludes AWS Lambda.",
             "required_canon_tool": "get_context",
+            "expected_tool_calls": [
+                {
+                    "name": "mcp__canon__get_context",
+                    "arguments": {"scope": "client/acme/project/payments"},
+                }
+            ],
             "required_acceptance_checks": [
                 "cloud_plan_created",
                 "inherits_acme_decision",
@@ -67,6 +80,12 @@ SCENARIOS = [
                 "knowledge remains unchanged."
             ),
             "required_canon_tool": "propose_knowledge",
+            "expected_tool_calls": [
+                {
+                    "name": "mcp__canon__propose_knowledge",
+                    "arguments": {"scope": "client/acme/project/payments"},
+                }
+            ],
             "required_acceptance_checks": [
                 "proposal_created",
                 "proposal_is_generated",
@@ -91,6 +110,16 @@ def main() -> None:
     matches = [dataset for dataset in existing if dataset.name == DEFAULT_DATASET_NAME]
     if matches:
         dataset = matches[0]
+        fixture_ids = {scenario["inputs"]["fixture_id"] for scenario in SCENARIOS}
+        current = dataset.to_df()
+        replaced_record_ids = [
+            row["dataset_record_id"]
+            for _, row in current.iterrows()
+            if isinstance(row["inputs"], dict)
+            and row["inputs"].get("fixture_id") in fixture_ids
+        ]
+        if replaced_record_ids:
+            dataset.delete_records(replaced_record_ids)
         action = "Updated"
     else:
         dataset = create_dataset(

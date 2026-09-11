@@ -27,6 +27,10 @@ CANON_TOOL_NAMES = {
     "propose_knowledge",
     "rebuild_knowledge_index",
 }
+ALLOWED_AGENT_TOOLS = ",".join(
+    ["Edit", "Glob", "Grep", "Read", "Write"]
+    + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
+)
 MAX_CAPTURE_CHARS = 20_000
 
 
@@ -181,6 +185,8 @@ def build_claude_command(
         "--no-session-persistence",
         "--permission-mode",
         "acceptEdits",
+        "--allowedTools",
+        ALLOWED_AGENT_TOOLS,
         "--setting-sources",
         "project",
         "--strict-mcp-config",
@@ -392,7 +398,10 @@ def execute_scenario(
 @mlflow.trace(name="canon_coding_agent_scenario", span_type=SpanType.AGENT)
 def run_scenario(fixture_id: str, task: str) -> dict[str, Any]:
     """MLflow prediction entry point. Its arguments match dataset input keys."""
-    mlflow.update_current_trace(tags={"scenario_id": fixture_id, "agent": "claude-code"})
+    # MLflow invokes predict_fn once without tracing while validating the dataset.
+    # Guard the trace update so that probe remains useful without emitting a warning.
+    if mlflow.get_current_active_span() is not None:
+        mlflow.update_current_trace(tags={"scenario_id": fixture_id, "agent": "claude-code"})
     result = execute_scenario(fixture_id, task)
 
     for call in result["tool_calls"]:

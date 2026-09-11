@@ -91,6 +91,11 @@ class AgentEvalHarnessTests(unittest.TestCase):
         )
         self.assertIn("--strict-mcp-config", command)
         self.assertIn("--no-session-persistence", command)
+        allowed_tools = command[command.index("--allowedTools") + 1]
+        self.assertIn("Write", allowed_tools)
+        self.assertIn("Edit", allowed_tools)
+        self.assertIn("mcp__canon__get_context", allowed_tools)
+        self.assertIn("mcp__canon__propose_knowledge", allowed_tools)
         self.assertIn("Bash,WebFetch,WebSearch", command)
         self.assertIn("/plugin", command)
         self.assertEqual(command[-1], "Perform the task")
