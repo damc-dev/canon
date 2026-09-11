@@ -7,7 +7,7 @@ import pytest
 from mlflow.genai.scorers import list_scorers
 
 from scripts.agent_eval_config import DEFAULT_DATASET_NAME, configure_mlflow, find_dataset
-from scripts.agent_eval_harness import run_scenario, validate_live_agent
+from scripts.agent_eval_harness import run_scenario, scenario_acceptance, validate_live_agent
 
 
 @mlflow.test
@@ -25,6 +25,6 @@ def test_canon_agent_golden_scenarios() -> None:
     result = mlflow.genai.evaluate(
         data=dataset,
         predict_fn=run_scenario,
-        scorers=scorers,
+        scorers=[*scorers, scenario_acceptance],
     )
     assert result.passed, result.reason

@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import mlflow
-from mlflow.entities import SpanType
+from mlflow.entities import Feedback, SpanType
+from mlflow.genai.scorers import scorer
 
 from scripts.agent_eval_config import PROJECT_ROOT
 
@@ -259,6 +260,7 @@ def _write_mcp_config(path: Path, plugin_root: Path) -> None:
                     "--project",
                     str(plugin_root),
                     "--frozen",
+                    "--no-dev",
                     "canon-mcp",
                 ],
             }
@@ -280,13 +282,19 @@ def _run_git(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def _initialize_git(workspace: Path) -> None:
     _run_git(workspace, "init", "--quiet")
     _run_git(workspace, "add", "--all")
+    # Isolate the baseline commit from the developer's signing and hook configuration.
     _run_git(
         workspace,
         "-c",
         "user.name=Canon Agent Eval",
         "-c",
         "user.email=canon-eval@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        f"core.hooksPath={os.devnull}",
         "commit",
+        "--no-verify",
         "--quiet",
         "-m",
         "fixture baseline",
@@ -393,6 +401,38 @@ def execute_scenario(
             },
             "harness_duration_seconds": round(time.monotonic() - started, 3),
         }
+
+
+def scenario_failures(outputs: dict[str, Any] | None) -> list[str]:
+    """Return deterministic reasons a scenario failed, independent of LLM judges."""
+    if not isinstance(outputs, dict):
+        return ["scenario produced no outputs"]
+    failures: list[str] = []
+    acceptance = outputs.get("acceptance") or {}
+    if not acceptance.get("passed"):
+        failed_checks = sorted(
+            name for name, passed in (acceptance.get("checks") or {}).items() if not passed
+        )
+        detail = ", ".join(failed_checks) if failed_checks else "no passing result"
+        failures.append(f"acceptance checks failed: {detail}")
+    agent = outputs.get("agent") or {}
+    if agent.get("timed_out"):
+        failures.append("agent timed out")
+    elif agent.get("return_code") != 0:
+        failures.append(f"agent exited with code {agent.get('return_code')}")
+    if agent.get("stream_error"):
+        failures.append(f"agent reported an error ({agent.get('terminal_reason')})")
+    return failures
+
+
+@scorer(name="canon_scenario_acceptance")
+def scenario_acceptance(outputs: dict[str, Any] | None) -> Feedback:
+    """Binary gate on hidden acceptance checks and a clean agent exit."""
+    failures = scenario_failures(outputs)
+    return Feedback(
+        value=not failures,
+        rationale="; ".join(failures) or "All acceptance checks passed and the agent exited cleanly.",
+    )
 
 
 @mlflow.trace(name="canon_coding_agent_scenario", span_type=SpanType.AGENT)

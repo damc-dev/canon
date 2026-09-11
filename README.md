@@ -94,7 +94,7 @@ Load the plugin directly during development:
 claude --plugin-dir /absolute/path/to/canon
 ```
 
-The plugin uses `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and starts the bundled server with `uv run --project ... --frozen`, so dependencies come from the committed lockfile without changing the Claude project working directory. The plugin remains portable when installed elsewhere.
+The plugin uses `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and starts the bundled server with `uv run --project ... --frozen --no-dev`, so runtime dependencies come from the committed lockfile without installing the development group or changing the Claude project working directory. The plugin remains portable when installed elsewhere.
 
 ## Initialize a project
 
@@ -280,8 +280,11 @@ uv run python -m scripts.list_datasets
 uv run python -m scripts.create_agent_eval_dataset
 ```
 
-Register the three reusable scorers. Choose a judge model that is available in
-your environment:
+Register the three reusable LLM-judge scorers. Choose a judge model that is
+available in your environment. Every evaluation also applies the deterministic
+`canon_scenario_acceptance` scorer, which fails a scenario when its hidden
+acceptance checks fail or the agent times out, exits non-zero, or reports an
+error.
 
 ```bash
 uv run python -m scripts.register_agent_eval_scorers \

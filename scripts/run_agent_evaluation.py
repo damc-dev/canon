@@ -4,7 +4,7 @@ from mlflow import genai
 from mlflow.genai.scorers import list_scorers
 
 from scripts.agent_eval_config import DEFAULT_DATASET_NAME, configure_mlflow, find_dataset
-from scripts.agent_eval_harness import run_scenario, validate_live_agent
+from scripts.agent_eval_harness import run_scenario, scenario_acceptance, validate_live_agent
 
 
 def main() -> None:
@@ -26,7 +26,9 @@ def main() -> None:
             "scripts.register_agent_eval_scorers --model <provider:/model>"
         )
 
-    result = genai.evaluate(data=dataset, predict_fn=run_scenario, scorers=scorers)
+    result = genai.evaluate(
+        data=dataset, predict_fn=run_scenario, scorers=[*scorers, scenario_acceptance]
+    )
     print(result)
 
 

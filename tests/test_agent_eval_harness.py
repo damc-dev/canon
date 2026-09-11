@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.agent_eval_harness import (
     build_claude_command,
     compare_inventories,
     execute_scenario,
     parse_claude_stream,
+    scenario_acceptance,
+    scenario_failures,
 )
 
 
@@ -104,6 +109,7 @@ class AgentEvalHarnessTests(unittest.TestCase):
         def good_invoker(workspace: Path, task: str, _plugin: Path, _mcp: Path):
             mcp_args = json.loads(_mcp.read_text(encoding="utf-8"))["mcpServers"]["canon"]["args"]
             self.assertIn("--project", mcp_args)
+            self.assertIn("--no-dev", mcp_args)
             self.assertNotIn("--directory", mcp_args)
             if "deployment-plan.md" in task:
                 (workspace / "deployment-plan.md").write_text(
@@ -140,6 +146,8 @@ class AgentEvalHarnessTests(unittest.TestCase):
                 result = execute_scenario(fixture_id, task, invoker=good_invoker)
                 self.assertTrue(result["acceptance"]["passed"])
                 self.assertEqual(len(result["canon_calls"]), 1)
+                self.assertEqual(scenario_failures(result), [])
+                self.assertIs(scenario_acceptance(outputs=result).value, True)
 
     def test_known_bad_control_fails_acceptance(self) -> None:
         def bad_invoker(workspace: Path, _task: str, _plugin: Path, _mcp: Path):
@@ -152,6 +160,50 @@ class AgentEvalHarnessTests(unittest.TestCase):
 
         result = execute_scenario("s001", "bad control", invoker=bad_invoker)
         self.assertFalse(result["acceptance"]["passed"])
+        feedback = scenario_acceptance(outputs=result)
+        self.assertIs(feedback.value, False)
+        self.assertIn("uses_active_decision", feedback.rationale)
+
+    def test_acceptance_scorer_fails_on_agent_errors(self) -> None:
+        passing = {"acceptance": {"passed": True, "checks": {}}}
+        cases = {
+            "timed out": {"timed_out": True, "return_code": 124},
+            "exited with code 1": {"timed_out": False, "return_code": 1},
+            "reported an error": {
+                "timed_out": False,
+                "return_code": 0,
+                "stream_error": True,
+                "terminal_reason": "max_budget",
+            },
+        }
+        for expected, agent in cases.items():
+            with self.subTest(expected=expected):
+                feedback = scenario_acceptance(outputs={**passing, "agent": agent})
+                self.assertIs(feedback.value, False)
+                self.assertIn(expected, feedback.rationale)
+        self.assertIs(scenario_acceptance(outputs=None).value, False)
+
+    def test_baseline_commit_ignores_global_signing_and_hooks(self) -> None:
+        def noop_invoker(_workspace: Path, _task: str, _plugin: Path, _mcp: Path):
+            return subprocess.CompletedProcess(
+                args=["fake-agent"], returncode=0, stdout="", stderr=""
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            hooks = Path(temporary) / "hooks"
+            hooks.mkdir()
+            pre_commit = hooks / "pre-commit"
+            pre_commit.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            pre_commit.chmod(0o755)
+            config = Path(temporary) / "gitconfig"
+            config.write_text(
+                "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n"
+                f"[core]\n\thooksPath = {hooks}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}):
+                result = execute_scenario("s001", "task", invoker=noop_invoker)
+        self.assertEqual(result["git_status"], [])
 
     def test_invalid_fixture_identifier_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
