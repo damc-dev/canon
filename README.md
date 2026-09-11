@@ -369,7 +369,7 @@ from every live job for post-failure inspection.
 Canon v0.2.0 is intentionally small:
 
 - local project knowledge only;
-- lexical SQLite FTS5 search, not embeddings;
+- lexical SQLite FTS5 search with English Porter stemming ("passwords" matches "password"), not embeddings — synonyms such as "credential" for "password" are not matched;
 - explicit scope strings, not an organizational ontology;
 - explicit supersession, not inferred conflict resolution;
 - Git provenance when the project is in Git;
