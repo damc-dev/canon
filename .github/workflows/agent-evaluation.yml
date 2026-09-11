@@ -9,6 +9,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_control:
+        description: Also run the scenarios without the plugin and report Canon's lift
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "17 7 * * *"
 
@@ -68,7 +73,11 @@ jobs:
           uv run python -m scripts.register_agent_eval_scorers --model "$JUDGE_MODEL"
           uv run python -m scripts.validate_agent_environment
       - name: Run live agent regression gate
+        if: ${{ !inputs.run_control }}
         run: uv run pytest -q tests/regression/test_canon_agent.py
+      - name: Run live agent regression gate with control arm
+        if: ${{ inputs.run_control }}
+        run: uv run python -m scripts.run_agent_evaluation --arm both
       - name: Upload MLflow evaluation records
         if: always()
         uses: actions/upload-artifact@v4

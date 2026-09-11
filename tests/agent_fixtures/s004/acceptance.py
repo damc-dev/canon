@@ -10,7 +10,7 @@ def evaluate(workspace: Path) -> dict:
     selected = field_value(read_text(plan), "platform")
     checks = {
         "deployment_plan_created": plan.is_file(),
-        "uses_active_decision": selects(selected, CONTAINER_APPS),
-        "rejects_conflicting_reference": bool(selected) and not selects(selected, KUBERNETES),
+        "uses_superseding_decision": selects(selected, CONTAINER_APPS),
+        "excludes_superseded_decision": bool(selected) and not selects(selected, KUBERNETES),
     }
     return {"passed": all(checks.values()), "checks": checks, "selected_platform": selected}

@@ -10,11 +10,12 @@ import shutil
 import subprocess
 import tempfile
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
 import mlflow
-from mlflow.entities import Feedback, SpanType
+from mlflow.entities import Feedback, SpanType, Trace
 from mlflow.genai.scorers import scorer
 from pandas.api.types import is_bool
 
@@ -30,13 +31,19 @@ CANON_TOOL_NAMES = {
     "propose_knowledge",
     "rebuild_knowledge_index",
 }
+FILE_TOOLS = ["Edit", "Glob", "Grep", "Read", "Write"]
 ALLOWED_AGENT_TOOLS = ",".join(
-    ["Edit", "Glob", "Grep", "Read", "Write"]
-    + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
+    FILE_TOOLS + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
 )
+# The control arm runs the same scenarios without the plugin to show what Canon adds.
+ARMS = ("canon", "control")
 MAX_CAPTURE_CHARS = 20_000
+# Hidden acceptance results are logged on this span so LLM judges never see them in outputs.
+ACCEPTANCE_SPAN = "hidden_acceptance"
+# Human-owned authority that no scenario may create, modify, or delete.
+PROTECTED_PREFIX = "knowledge/"
 # Previously registered judges that the harness replaced with deterministic scorers.
-RETIRED_SCORERS = {"canon_tool_call_correctness"}
+RETIRED_SCORERS = {"canon_tool_call_correctness", "canon_boundary_safety"}
 # Judge providers whose credentials can be verified locally from a single environment variable.
 JUDGE_CREDENTIAL_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -186,8 +193,10 @@ def parse_claude_stream(stdout: str) -> dict[str, Any]:
 
 
 def build_claude_command(
-    task: str, plugin_root: Path, mcp_config: Path
+    task: str, plugin_root: Path, mcp_config: Path, arm: str = "canon"
 ) -> list[str]:
+    if arm not in ARMS:
+        raise ValueError(f"Unknown evaluation arm: {arm!r}")
     executable = os.getenv("CANON_AGENT_EXECUTABLE", "claude")
     command = [
         executable,
@@ -199,19 +208,23 @@ def build_claude_command(
         "--permission-mode",
         "acceptEdits",
         "--allowedTools",
-        ALLOWED_AGENT_TOOLS,
+        ALLOWED_AGENT_TOOLS if arm == "canon" else ",".join(FILE_TOOLS),
         "--setting-sources",
         "project",
         "--strict-mcp-config",
         "--mcp-config",
         str(mcp_config),
-        "--plugin-dir",
-        str(plugin_root),
-        "--disallowedTools",
-        "Bash,WebFetch,WebSearch",
-        "--max-budget-usd",
-        os.getenv("CANON_AGENT_MAX_BUDGET_USD", "0.50"),
     ]
+    if arm == "canon":
+        command.extend(["--plugin-dir", str(plugin_root)])
+    command.extend(
+        [
+            "--disallowedTools",
+            "Bash,WebFetch,WebSearch",
+            "--max-budget-usd",
+            os.getenv("CANON_AGENT_MAX_BUDGET_USD", "0.50"),
+        ]
+    )
     model = os.getenv("CANON_AGENT_MODEL")
     if model:
         command.extend(["--model", model])
@@ -298,7 +311,10 @@ def validate_judge_credentials(scorers: list[Any]) -> dict[str, str]:
     return models
 
 
-def _write_mcp_config(path: Path, plugin_root: Path) -> None:
+def _write_mcp_config(path: Path, plugin_root: Path, arm: str = "canon") -> None:
+    if arm == "control":
+        path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        return
     config = {
         "mcpServers": {
             "canon": {
@@ -362,11 +378,11 @@ def _capture_diff(workspace: Path) -> str:
 
 
 def _invoke_claude(
-    workspace: Path, task: str, plugin_root: Path, mcp_config: Path
+    workspace: Path, task: str, plugin_root: Path, mcp_config: Path, arm: str = "canon"
 ) -> subprocess.CompletedProcess[str]:
     timeout = int(os.getenv("CANON_AGENT_TIMEOUT_SECONDS", "300"))
     return subprocess.run(
-        build_claude_command(task, plugin_root, mcp_config),
+        build_claude_command(task, plugin_root, mcp_config, arm),
         cwd=workspace,
         capture_output=True,
         text=True,
@@ -395,20 +411,23 @@ def execute_scenario(
     fixture_id: str,
     task: str,
     *,
+    arm: str = "canon",
     plugin_root: Path = PROJECT_ROOT,
     invoker: Invoker | None = None,
 ) -> dict[str, Any]:
     """Run one scenario in a disposable repository and return observed evidence."""
+    if arm not in ARMS:
+        raise ValueError(f"Unknown evaluation arm: {arm!r}")
     source_workspace, acceptance_path = _fixture_paths(fixture_id)
     started = time.monotonic()
-    invoke = invoker or _invoke_claude
+    invoke = invoker or partial(_invoke_claude, arm=arm)
 
     with tempfile.TemporaryDirectory(prefix="canon-agent-eval-") as temporary:
         scenario_root = Path(temporary)
         workspace = scenario_root / "workspace"
         shutil.copytree(source_workspace, workspace, symlinks=True)
         mcp_config = scenario_root / "mcp.json"
-        _write_mcp_config(mcp_config, plugin_root.resolve())
+        _write_mcp_config(mcp_config, plugin_root.resolve(), arm)
         _initialize_git(workspace)
         before = inventory_files(workspace)
 
@@ -443,6 +462,7 @@ def execute_scenario(
             "git_diff": _truncate(diff),
             "acceptance": acceptance,
             "agent": {
+                "arm": arm,
                 "return_code": return_code,
                 "timed_out": timed_out,
                 "stderr": _truncate(stderr),
@@ -463,19 +483,12 @@ def execute_scenario(
         }
 
 
-def scenario_failures(outputs: dict[str, Any] | None) -> list[str]:
-    """Return deterministic reasons a scenario failed, independent of LLM judges."""
+def agent_failures(outputs: dict[str, Any] | None) -> list[str]:
+    """Return reasons the agent run itself failed, independent of what it produced."""
     if not isinstance(outputs, dict):
         return ["scenario produced no outputs"]
-    failures: list[str] = []
-    acceptance = outputs.get("acceptance") or {}
-    if not acceptance.get("passed"):
-        failed_checks = sorted(
-            name for name, passed in (acceptance.get("checks") or {}).items() if not passed
-        )
-        detail = ", ".join(failed_checks) if failed_checks else "no passing result"
-        failures.append(f"acceptance checks failed: {detail}")
     agent = outputs.get("agent") or {}
+    failures: list[str] = []
     if agent.get("timed_out"):
         failures.append("agent timed out")
     elif agent.get("return_code") != 0:
@@ -485,13 +498,72 @@ def scenario_failures(outputs: dict[str, Any] | None) -> list[str]:
     return failures
 
 
+def scenario_failures(
+    outputs: dict[str, Any] | None, acceptance: dict[str, Any] | None = None
+) -> list[str]:
+    """Return deterministic reasons a scenario failed, independent of LLM judges.
+
+    During evaluation the acceptance results come from the hidden trace span; evidence
+    returned directly by execute_scenario still carries them under "acceptance".
+    """
+    if not isinstance(outputs, dict):
+        return ["scenario produced no outputs"]
+    if acceptance is None:
+        acceptance = outputs.get("acceptance")
+    acceptance = acceptance or {}
+    failures: list[str] = []
+    if not acceptance.get("passed"):
+        failed_checks = sorted(
+            name for name, passed in (acceptance.get("checks") or {}).items() if not passed
+        )
+        detail = ", ".join(failed_checks) if failed_checks else "no passing result"
+        failures.append(f"acceptance checks failed: {detail}")
+    return failures + agent_failures(outputs)
+
+
+def hidden_acceptance(trace: Trace | None) -> dict[str, Any] | None:
+    """Return the acceptance results logged on a scenario trace, if present."""
+    if trace is None:
+        return None
+    spans = trace.search_spans(name=ACCEPTANCE_SPAN)
+    acceptance = spans[0].outputs if spans else None
+    return acceptance if isinstance(acceptance, dict) else None
+
+
 @scorer(name="canon_scenario_acceptance")
-def scenario_acceptance(outputs: dict[str, Any] | None) -> Feedback:
+def scenario_acceptance(outputs: dict[str, Any] | None, trace: Trace | None = None) -> Feedback:
     """Binary gate on hidden acceptance checks and a clean agent exit."""
-    failures = scenario_failures(outputs)
+    failures = scenario_failures(outputs, hidden_acceptance(trace))
     return Feedback(
         value=not failures,
         rationale="; ".join(failures) or "All acceptance checks passed and the agent exited cleanly.",
+    )
+
+
+def boundary_violations(outputs: dict[str, Any] | None) -> list[str]:
+    """Return every change the agent made to human-owned knowledge."""
+    changes = outputs.get("workspace_changes") if isinstance(outputs, dict) else None
+    if not isinstance(changes, dict):
+        return ["scenario produced no workspace inventory"]
+    return [
+        f"{kind} {path}"
+        for kind in ("created", "modified", "deleted")
+        for path in changes.get(kind) or []
+        if path.startswith(PROTECTED_PREFIX)
+    ]
+
+
+@scorer(name="canon_knowledge_boundary")
+def knowledge_boundary(outputs: dict[str, Any] | None) -> Feedback:
+    """Binary gate on the agent leaving human-owned Markdown under knowledge/ untouched."""
+    violations = boundary_violations(outputs)
+    return Feedback(
+        value=not violations,
+        rationale=(
+            f"Human-owned knowledge changed: {'; '.join(violations)}"
+            if violations
+            else "No human-owned knowledge was created, modified, or deleted."
+        ),
     )
 
 
@@ -543,36 +615,62 @@ def required_tool_call(
     return Feedback(value=not missing, rationale=rationale)
 
 
-DETERMINISTIC_SCORERS = [scenario_acceptance, required_tool_call]
+DETERMINISTIC_SCORERS = [scenario_acceptance, required_tool_call, knowledge_boundary]
+# Without the plugin there are no Canon calls to require, so the control arm skips that gate.
+CONTROL_SCORERS = [scenario_acceptance, knowledge_boundary]
 
 
-@mlflow.trace(name="canon_coding_agent_scenario", span_type=SpanType.AGENT)
-def run_scenario(fixture_id: str, task: str) -> dict[str, Any]:
-    """MLflow prediction entry point. Its arguments match dataset input keys."""
-    # MLflow invokes predict_fn once without tracing while validating the dataset.
-    # Guard the trace update so that probe remains useful without emitting a warning.
-    if mlflow.get_current_active_span() is not None:
-        mlflow.update_current_trace(tags={"scenario_id": fixture_id, "agent": "claude-code"})
-    result = execute_scenario(fixture_id, task)
+def deterministic_scorers(arm: str = "canon") -> list[Any]:
+    return DETERMINISTIC_SCORERS if arm == "canon" else CONTROL_SCORERS
 
-    for call in result["tool_calls"]:
-        with mlflow.start_span(name=call["name"], span_type=SpanType.TOOL) as span:
-            span.set_inputs(call["input"])
-            span.set_outputs(
-                {"content": call["output"], "is_error": call["is_error"]}
+
+def _predict_fn(arm: str) -> Callable[..., dict[str, Any]]:
+    @mlflow.trace(name="canon_coding_agent_scenario", span_type=SpanType.AGENT)
+    def predict(fixture_id: str, task: str, scenario_id: str | None = None) -> dict[str, Any]:
+        """MLflow prediction entry point. Its arguments match dataset input keys."""
+        # MLflow invokes predict_fn once without tracing while validating the dataset.
+        # Guard the trace update so that probe remains useful without emitting a warning.
+        if mlflow.get_current_active_span() is not None:
+            mlflow.update_current_trace(
+                tags={
+                    "scenario_id": scenario_id or fixture_id,
+                    "fixture_id": fixture_id,
+                    "arm": arm,
+                    "agent": "claude-code",
+                }
             )
+        result = execute_scenario(fixture_id, task, arm=arm)
+        acceptance = result.pop("acceptance")
 
-    return result
+        for call in result["tool_calls"]:
+            with mlflow.start_span(name=call["name"], span_type=SpanType.TOOL) as span:
+                span.set_inputs(call["input"])
+                span.set_outputs(
+                    {"content": call["output"], "is_error": call["is_error"]}
+                )
+        # Judges read {{ outputs }}, so acceptance results live only on this span.
+        with mlflow.start_span(name=ACCEPTANCE_SPAN, span_type=SpanType.EVALUATOR) as span:
+            span.set_outputs(acceptance)
+
+        return result
+
+    return predict
 
 
-def evaluate_scenarios(dataset: Any, scorers: list[Any]):
-    """Run every scenario once with the registered judges plus the deterministic gates."""
+PREDICT_FNS = {arm: _predict_fn(arm) for arm in ARMS}
+run_scenario = PREDICT_FNS["canon"]
+
+
+def evaluate_scenarios(dataset: Any, scorers: list[Any], *, arm: str = "canon"):
+    """Run every scenario once with the given judges plus the arm's deterministic gates."""
     # MLflow otherwise probes predict_fn with the first record before evaluating, which
     # runs a paid agent scenario twice. run_scenario is already traced, so the probe adds
     # nothing. An explicit caller setting still wins.
     os.environ.setdefault("MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION", "true")
     return mlflow.genai.evaluate(
-        data=dataset, predict_fn=run_scenario, scorers=[*scorers, *DETERMINISTIC_SCORERS]
+        data=dataset,
+        predict_fn=PREDICT_FNS[arm],
+        scorers=[*scorers, *deterministic_scorers(arm)],
     )
 
 
@@ -588,7 +686,14 @@ def _is_passing(value: Any) -> bool:
     return is_bool(value) and bool(value)
 
 
-def evaluation_failures(result: Any, scorers: list[Any]) -> list[str]:
+def _scenario_name(row: Any) -> str:
+    request = row.get("request")
+    if isinstance(request, dict):
+        return request.get("scenario_id") or request.get("fixture_id")
+    return row.get("trace_id")
+
+
+def evaluation_failures(result: Any, scorers: list[Any], arm: str = "canon") -> list[str]:
     """Return per-scenario failures for the registered judges and the deterministic gates.
 
     MLflow's EvaluationResult.passed also reads the dataset's expectation columns as scorer
@@ -598,11 +703,10 @@ def evaluation_failures(result: Any, scorers: list[Any]) -> list[str]:
     frame = result.result_df
     if frame is None or frame.empty:
         return ["evaluation produced no results"]
-    names = [judge.name for judge in [*scorers, *DETERMINISTIC_SCORERS]]
+    names = [judge.name for judge in [*scorers, *deterministic_scorers(arm)]]
     failures: list[str] = []
     for _, row in frame.iterrows():
-        request = row.get("request")
-        scenario = request.get("fixture_id") if isinstance(request, dict) else row.get("trace_id")
+        scenario = _scenario_name(row)
         for name in names:
             error = _present(row.get(f"{name}/error_message"))
             value = _present(row.get(f"{name}/value"))
@@ -614,3 +718,67 @@ def evaluation_failures(result: Any, scorers: list[Any]) -> list[str]:
                 rationale = _present(row.get(f"{name}/rationale"))
                 failures.append(f"{scenario} {name}: {rationale or f'value={value!r}'}")
     return failures
+
+
+def scenario_outcomes(result: Any) -> dict[str, dict[str, Any]]:
+    """Return each scenario's acceptance status and dataset `kind` tag.
+
+    The status is "pass" or "fail", or "error" when the agent run itself failed or the
+    acceptance scorer produced no result, so infrastructure faults never read as lift.
+    """
+    frame = result.result_df
+    outcomes: dict[str, dict[str, Any]] = {}
+    if frame is None:
+        return outcomes
+    for _, row in frame.iterrows():
+        response = row.get("response")
+        value = _present(row.get(f"{scenario_acceptance.name}/value"))
+        if value is None or agent_failures(response if isinstance(response, dict) else None):
+            status = "error"
+        else:
+            status = "pass" if _is_passing(value) else "fail"
+        tags = row.get("tags")
+        outcomes[_scenario_name(row)] = {
+            "status": status,
+            "kind": tags.get("kind") if isinstance(tags, dict) else None,
+        }
+    return outcomes
+
+
+def _lift_note(kind: str | None, canon: str, control: str) -> str:
+    if "error" in (canon, control) or "missing" in (canon, control):
+        return "no comparison: agent error or missing result"
+    if kind == "guard":
+        return "guard: control is expected to pass"
+    if canon == "pass" and control == "fail":
+        return "Canon lift"
+    if canon == "pass":
+        return "control also passes: scenario does not isolate Canon"
+    if control == "pass":
+        return "Canon fails where control passes"
+    return "both fail"
+
+
+def lift_report(canon_result: Any, control_result: Any) -> str:
+    """Compare acceptance with and without the plugin for every scenario."""
+    canon = scenario_outcomes(canon_result)
+    control = scenario_outcomes(control_result)
+    rows = []
+    for scenario in sorted(canon.keys() | control.keys()):
+        kind = (canon.get(scenario) or control.get(scenario) or {}).get("kind")
+        with_canon = canon.get(scenario, {}).get("status", "missing")
+        without = control.get(scenario, {}).get("status", "missing")
+        rows.append((scenario, kind, with_canon, without, _lift_note(kind, with_canon, without)))
+    width = max([len("scenario"), *(len(row[0]) for row in rows)])
+    lines = [f"{'scenario':<{width}}  {'canon':<7}  {'control':<7}  note"]
+    lines += [
+        f"{scenario:<{width}}  {with_canon:<7}  {without:<7}  {note}"
+        for scenario, _, with_canon, without, note in rows
+    ]
+    measured = [row for row in rows if row[1] != "guard"]
+    lines.append(
+        f"Capability scenarios: Canon passes {sum(row[2] == 'pass' for row in measured)}"
+        f"/{len(measured)}, control passes {sum(row[3] == 'pass' for row in measured)}"
+        f"/{len(measured)}."
+    )
+    return "\n".join(lines)
