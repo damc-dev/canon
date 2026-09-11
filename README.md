@@ -281,10 +281,12 @@ uv run python -m scripts.create_agent_eval_dataset
 ```
 
 Register the three reusable LLM-judge scorers. Choose a judge model that is
-available in your environment. Every evaluation also applies the deterministic
-`canon_scenario_acceptance` scorer, which fails a scenario when its hidden
-acceptance checks fail or the agent times out, exits non-zero, or reports an
-error.
+available in your environment. Judges call the provider API directly, so they
+need their own credentials (for example `ANTHROPIC_API_KEY`) even when Claude
+Code is signed in with a Claude.ai subscription. Every evaluation also applies
+the deterministic `canon_scenario_acceptance` scorer, which fails a scenario
+when its hidden acceptance checks fail or the agent times out, exits non-zero,
+or reports an error.
 
 ```bash
 uv run python -m scripts.register_agent_eval_scorers \
@@ -298,14 +300,16 @@ single MLflow trace:
 uv run python -m scripts.validate_agent_tracing
 ```
 
-Check the local dataset, scorer registration, Claude installation, and
-authentication before spending model calls:
+Check the local dataset, scorer registration, judge credentials, Claude
+installation, and authentication before spending model calls:
 
 ```bash
 uv run python -m scripts.validate_agent_environment
 ```
 
-After authenticating Claude Code, run the complete dataset evaluation:
+After authenticating Claude Code, run the complete dataset evaluation. It runs
+each scenario exactly once (MLflow's pre-evaluation prediction probe is skipped)
+and exits non-zero when any scorer fails or errors:
 
 ```bash
 uv run python -m scripts.run_agent_evaluation

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from mlflow import genai
 from mlflow.genai.scorers import list_scorers
 
 from scripts.agent_eval_config import DEFAULT_DATASET_NAME, configure_mlflow, find_dataset
-from scripts.agent_eval_harness import run_scenario, scenario_acceptance, validate_live_agent
+from scripts.agent_eval_harness import (
+    evaluate_scenarios,
+    validate_judge_credentials,
+    validate_live_agent,
+)
 
 
 def main() -> None:
@@ -25,11 +28,15 @@ def main() -> None:
             "No registered scorers. Run: uv run python -m "
             "scripts.register_agent_eval_scorers --model <provider:/model>"
         )
+    try:
+        validate_judge_credentials(scorers)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    result = genai.evaluate(
-        data=dataset, predict_fn=run_scenario, scorers=[*scorers, scenario_acceptance]
-    )
+    result = evaluate_scenarios(dataset, scorers)
     print(result)
+    if not result.passed:
+        raise SystemExit(f"Agent evaluation failed.\n{result.reason}")
 
 
 if __name__ == "__main__":

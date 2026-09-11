@@ -6,15 +6,20 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from scripts import run_agent_evaluation
 from scripts.agent_eval_harness import (
     build_claude_command,
     compare_inventories,
+    evaluate_scenarios,
     execute_scenario,
     parse_claude_stream,
+    run_scenario,
     scenario_acceptance,
     scenario_failures,
+    validate_judge_credentials,
 )
 
 
@@ -226,6 +231,88 @@ class AgentEvalHarnessTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}):
                 result = execute_scenario("s001", "task", invoker=noop_invoker)
         self.assertEqual(result["git_status"], [])
+
+    def test_judge_credentials_are_required_for_known_providers(self) -> None:
+        judges = [
+            SimpleNamespace(name="authority", model="anthropic:/claude-haiku-4-5-20251001"),
+            SimpleNamespace(name="tools", model="anthropic:/claude-haiku-4-5-20251001"),
+            SimpleNamespace(name="custom", model="bedrock:/some-model"),
+            SimpleNamespace(name="code_based"),
+        ]
+        with mock.patch.dict(os.environ, clear=True):
+            with self.assertRaises(RuntimeError) as raised:
+                validate_judge_credentials(judges)
+        self.assertIn("set ANTHROPIC_API_KEY for authority, tools", str(raised.exception))
+
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True):
+            models = validate_judge_credentials(judges)
+        self.assertEqual(
+            models,
+            {
+                "authority": "anthropic:/claude-haiku-4-5-20251001",
+                "tools": "anthropic:/claude-haiku-4-5-20251001",
+                "custom": "bedrock:/some-model",
+            },
+        )
+
+    def test_evaluation_skips_duplicate_prediction_probe(self) -> None:
+        judge = SimpleNamespace(name="judge")
+        observed = {}
+
+        def fake_evaluate(**kwargs):
+            observed.update(kwargs)
+            observed["skip"] = os.environ.get("MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION")
+            return "result"
+
+        with (
+            mock.patch.dict(os.environ, clear=True),
+            mock.patch("mlflow.genai.evaluate", side_effect=fake_evaluate),
+        ):
+            self.assertEqual(evaluate_scenarios("dataset", [judge]), "result")
+        self.assertEqual(observed["skip"], "true")
+        self.assertIs(observed["predict_fn"], run_scenario)
+        self.assertEqual(observed["scorers"], [judge, scenario_acceptance])
+
+        with (
+            mock.patch.dict(
+                os.environ, {"MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION": "false"}, clear=True
+            ),
+            mock.patch("mlflow.genai.evaluate", side_effect=fake_evaluate),
+        ):
+            evaluate_scenarios("dataset", [judge])
+        self.assertEqual(observed["skip"], "false")
+
+    def test_run_agent_evaluation_exit_status(self) -> None:
+        judge = SimpleNamespace(name="judge", model="anthropic:/claude-haiku-4-5-20251001")
+        failed = SimpleNamespace(passed=False, reason="judge: SCORER_ERROR")
+        patches = [
+            mock.patch.object(run_agent_evaluation, "validate_live_agent"),
+            mock.patch.object(run_agent_evaluation, "configure_mlflow", return_value="1"),
+            mock.patch.object(run_agent_evaluation, "find_dataset", return_value="dataset"),
+            mock.patch.object(run_agent_evaluation, "list_scorers", return_value=[judge]),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        with (
+            mock.patch.dict(os.environ, clear=True),
+            mock.patch.object(run_agent_evaluation, "evaluate_scenarios") as evaluate,
+            mock.patch("builtins.print"),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                run_agent_evaluation.main()
+        self.assertIn("ANTHROPIC_API_KEY", str(raised.exception.code))
+        evaluate.assert_not_called()
+
+        with (
+            mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True),
+            mock.patch.object(run_agent_evaluation, "evaluate_scenarios", return_value=failed),
+            mock.patch("builtins.print"),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                run_agent_evaluation.main()
+        self.assertIn("judge: SCORER_ERROR", str(raised.exception.code))
 
     def test_invalid_fixture_identifier_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

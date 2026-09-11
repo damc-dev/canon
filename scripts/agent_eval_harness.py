@@ -33,6 +33,14 @@ ALLOWED_AGENT_TOOLS = ",".join(
     + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
 )
 MAX_CAPTURE_CHARS = 20_000
+# Judge providers whose credentials can be verified locally from a single environment variable.
+JUDGE_CREDENTIAL_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
 
 
 def _truncate(value: str, limit: int = MAX_CAPTURE_CHARS) -> str:
@@ -250,6 +258,31 @@ def validate_live_agent() -> dict[str, Any]:
     }
 
 
+def validate_judge_credentials(scorers: list[Any]) -> dict[str, str]:
+    """Fail before an evaluation spends agent runs when a judge cannot authenticate.
+
+    Claude Code subscription logins do not grant API access, so judges need their own key.
+    Providers without a known credential variable are not checked.
+    """
+    models: dict[str, str] = {}
+    missing: dict[str, list[str]] = {}
+    for judge in scorers:
+        model = getattr(judge, "model", None)
+        if not isinstance(model, str) or ":" not in model:
+            continue
+        models[judge.name] = model
+        variable = JUDGE_CREDENTIAL_ENV.get(model.split(":", 1)[0])
+        if variable and not os.getenv(variable):
+            missing.setdefault(variable, []).append(judge.name)
+    if missing:
+        detail = "; ".join(
+            f"set {variable} for {', '.join(sorted(names))}"
+            for variable, names in sorted(missing.items())
+        )
+        raise RuntimeError(f"Judge model credentials are missing: {detail}.")
+    return models
+
+
 def _write_mcp_config(path: Path, plugin_root: Path) -> None:
     config = {
         "mcpServers": {
@@ -464,3 +497,14 @@ def run_scenario(fixture_id: str, task: str) -> dict[str, Any]:
             )
 
     return result
+
+
+def evaluate_scenarios(dataset: Any, scorers: list[Any]):
+    """Run every scenario once with the registered judges plus the deterministic gate."""
+    # MLflow otherwise probes predict_fn with the first record before evaluating, which
+    # runs a paid agent scenario twice. run_scenario is already traced, so the probe adds
+    # nothing. An explicit caller setting still wins.
+    os.environ.setdefault("MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION", "true")
+    return mlflow.genai.evaluate(
+        data=dataset, predict_fn=run_scenario, scorers=[*scorers, scenario_acceptance]
+    )
