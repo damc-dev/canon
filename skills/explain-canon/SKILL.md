@@ -1,6 +1,6 @@
 ---
 name: explain-canon
-description: This skill should be used when the user asks "why do you believe that", "where did that decision come from", "what superseded this", "show the decision history", or asks for provenance behind Canon context.
+description: Trace an established choice back to its source file, scope, and Git history. Use for any question about why the project does something a particular way, what decided it, when or by whom it changed, or what replaced an earlier choice - including task-shaped requests like "why does the payments API deploy to Container Apps rather than AKS", "document which decision applies and cite the commit", or "write up where this constraint came from". Use it rather than reading knowledge files directly, since provenance and supersession live outside the file text.
 version: 0.2.0
 ---
 

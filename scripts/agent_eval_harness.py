@@ -32,8 +32,13 @@ CANON_TOOL_NAMES = {
     "rebuild_knowledge_index",
 }
 FILE_TOOLS = ["Edit", "Glob", "Grep", "Read", "Write"]
+# Reaching Canon needs Skill (the plugin's skills) and ToolSearch (the MCP tools load on
+# demand). --allowedTools only pre-approves permission prompts, so --tools carries the
+# actual restriction: without it the agent also holds Agent, Monitor, Workflow, and the
+# rest of the built-in set, which no scenario should need.
+BUILTIN_AGENT_TOOLS = FILE_TOOLS + ["Skill", "ToolSearch"]
 ALLOWED_AGENT_TOOLS = ",".join(
-    FILE_TOOLS + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
+    BUILTIN_AGENT_TOOLS + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
 )
 # The control arm runs the same scenarios without the plugin to show what Canon adds.
 ARMS = ("canon", "control")
@@ -207,6 +212,8 @@ def build_claude_command(
         "--no-session-persistence",
         "--permission-mode",
         "acceptEdits",
+        "--tools",
+        ",".join(BUILTIN_AGENT_TOOLS if arm == "canon" else FILE_TOOLS),
         "--allowedTools",
         ALLOWED_AGENT_TOOLS if arm == "canon" else ",".join(FILE_TOOLS),
         "--setting-sources",
