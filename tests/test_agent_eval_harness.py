@@ -225,15 +225,15 @@ class AgentEvalHarnessTests(unittest.TestCase):
         self.assertIn("--strict-mcp-config", command)
         self.assertIn("--no-session-persistence", command)
         # --allowedTools only pre-approves prompts; --tools is what withholds Agent,
-        # Monitor, and the rest of the built-in set from the scenario.
+        # Monitor, and the rest of the built-in set from the scenario. ToolSearch is left
+        # out on purpose so the Canon tools are listed directly instead of deferred.
         builtin_tools = command[command.index("--tools") + 1]
-        self.assertEqual(builtin_tools, "Edit,Glob,Grep,Read,Write,Skill,ToolSearch")
+        self.assertEqual(builtin_tools, "Edit,Glob,Grep,Read,Write,Skill")
+        self.assertNotIn("ToolSearch", command[command.index("--tools") + 1])
         allowed_tools = command[command.index("--allowedTools") + 1]
         self.assertIn("Write", allowed_tools)
         self.assertIn("Edit", allowed_tools)
-        # Canon is only reachable through a skill, whose tools load on demand.
         self.assertIn("Skill", allowed_tools)
-        self.assertIn("ToolSearch", allowed_tools)
         self.assertIn("mcp__canon__get_context", allowed_tools)
         self.assertIn("mcp__canon__propose_knowledge", allowed_tools)
         self.assertIn("Bash,WebFetch,WebSearch", command)

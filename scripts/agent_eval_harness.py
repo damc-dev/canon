@@ -32,11 +32,14 @@ CANON_TOOL_NAMES = {
     "rebuild_knowledge_index",
 }
 FILE_TOOLS = ["Edit", "Glob", "Grep", "Read", "Write"]
-# Reaching Canon needs Skill (the plugin's skills) and ToolSearch (the MCP tools load on
-# demand). --allowedTools only pre-approves permission prompts, so --tools carries the
-# actual restriction: without it the agent also holds Agent, Monitor, Workflow, and the
-# rest of the built-in set, which no scenario should need.
-BUILTIN_AGENT_TOOLS = FILE_TOOLS + ["Skill", "ToolSearch"]
+# Withholding ToolSearch is deliberate: Claude Code defers MCP tools behind it only when
+# it is available, and that hop cost s005 its run (ten identical searches, then a fallback
+# to Glob). Without it the five Canon tools are listed directly, so a scenario can reach
+# Canon whether or not a skill fires. Skill stays, since the plugin's skills need it.
+# --allowedTools only pre-approves permission prompts, so --tools carries the actual
+# restriction: without it the agent also holds Agent, Monitor, Workflow, and the rest of
+# the built-in set, which no scenario should need.
+BUILTIN_AGENT_TOOLS = FILE_TOOLS + ["Skill"]
 ALLOWED_AGENT_TOOLS = ",".join(
     BUILTIN_AGENT_TOOLS + [f"mcp__canon__{name}" for name in sorted(CANON_TOOL_NAMES)]
 )
