@@ -1,6 +1,6 @@
 ---
 name: capture-canon-decision
-description: This skill should be used when the user says "remember this decision", "capture this constraint", "make this project knowledge", "record this for later", or when a durable decision emerges during a working session.
+description: Turn a durable decision into a reviewable Canon proposal instead of an ad-hoc note or memory file. Use whenever asked to remember, record, capture, note, or persist something for later or for future sessions, and whenever the user states a decision the project should follow from now on - "we've decided to move to AKS", "we use PostgreSQL for the database", "going forward, deploys go through staging". Applies even when the request sounds like a personal note and never mentions Canon.
 version: 0.2.0
 ---
 

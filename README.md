@@ -280,15 +280,32 @@ uv run python -m scripts.list_datasets
 uv run python -m scripts.create_agent_eval_dataset
 ```
 
-Register the two reusable LLM-judge scorers. Choose a judge model that is
-available in your environment. Judges call the provider API directly, so they
-need their own credentials (for example `ANTHROPIC_API_KEY`) even when Claude
-Code is signed in with a Claude.ai subscription. Re-running registration also
-removes retired scorers. Every evaluation also applies two deterministic
-scorers without registration: `canon_scenario_acceptance` fails a scenario when
-its hidden acceptance checks fail or the agent times out, exits non-zero, or
-reports an error, and `canon_required_tool_call` fails when an expected Canon
-tool was not called with the expected arguments (extra calls are allowed).
+The suite covers the core rules above: authority precedence over reference
+material, ancestor inheritance with sibling isolation, the proposal boundary,
+scope-aware supersession, generated-content demotion, locked constraints under
+user pressure, surfacing UNKNOWN, provenance with Git history, supersession
+through a proposal, and a guard against proposing transient remarks. Scenarios
+whose ID ends in `-implicit` name neither Canon nor the scope (the fixture's
+`CLAUDE.md` supplies it), so they test whether the plugin's skills trigger on
+their own. Each scenario's fixture is the `sNNN` prefix of its ID under
+`tests/agent_fixtures/`; its `acceptance.py` uses the tolerant answer parsing in
+`scripts/agent_acceptance.py`, and the harness tests run a known-good and a
+known-bad outcome against every fixture.
+
+Register the reusable LLM-judge scorer. Choose a judge model that is available
+in your environment. Judges call the provider API directly, so they need their
+own credentials (for example `ANTHROPIC_API_KEY`) even when Claude Code is signed
+in with a Claude.ai subscription. Re-running registration also removes retired
+scorers. `canon_authority_compliance` grades what scripts cannot check: whether
+reference-only instructions were ignored, gaps were reported honestly, and
+sources were cited. Hidden acceptance results are logged on a separate trace
+span, so the judge never sees them. Every evaluation also applies three
+deterministic scorers without registration: `canon_scenario_acceptance` fails a
+scenario when its hidden acceptance checks fail or the agent times out, exits
+non-zero, or reports an error; `canon_required_tool_call` fails when an expected
+Canon tool was not called with the expected arguments (extra calls are allowed);
+and `canon_knowledge_boundary` fails when the agent created, modified, or deleted
+anything under `knowledge/`.
 
 ```bash
 uv run python -m scripts.register_agent_eval_scorers \
@@ -317,6 +334,16 @@ and exits non-zero when any scorer fails or errors:
 uv run python -m scripts.run_agent_evaluation
 ```
 
+To see what Canon contributes, run the same scenarios without the plugin. The
+control arm gives the agent the same file tools but no plugin or MCP server,
+applies only the deterministic gates, and never fails the run. `--arm both`
+gates on the Canon arm and prints a per-scenario lift report; a capability
+scenario that the control arm also passes does not isolate Canon's behavior:
+
+```bash
+uv run python -m scripts.run_agent_evaluation --arm both
+```
+
 For a pull-request-style binary regression gate, enable the paid agent suite
 explicitly:
 
@@ -331,7 +358,8 @@ to the coding agent.
 
 The `Agent evaluation` GitHub workflow runs deterministic harness tests on pull
 requests. Its paid regression job runs only on the nightly schedule or an
-explicit workflow dispatch with `run_live` enabled. Configure
+explicit workflow dispatch with `run_live` enabled; also enable `run_control`
+to add the control arm and lift report. Configure
 `ANTHROPIC_API_KEY`; optional repository variables `CANON_AGENT_MODEL` and
 `CANON_JUDGE_MODEL` override the pinned defaults. MLflow records are uploaded
 from every live job for post-failure inspection.
@@ -341,7 +369,7 @@ from every live job for post-failure inspection.
 Canon v0.2.0 is intentionally small:
 
 - local project knowledge only;
-- lexical SQLite FTS5 search, not embeddings;
+- lexical SQLite FTS5 search with English Porter stemming ("passwords" matches "password"), not embeddings — synonyms such as "credential" for "password" are not matched;
 - explicit scope strings, not an organizational ontology;
 - explicit supersession, not inferred conflict resolution;
 - Git provenance when the project is in Git;

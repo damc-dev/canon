@@ -1,6 +1,6 @@
 ---
 name: canon-context
-description: This skill should be used when the user asks to "implement a feature", "design the architecture", "choose a technology", "change infrastructure", or do other consequential project work that should honor established Canon decisions and constraints.
+description: Load established project knowledge before consequential work, so the answer follows decisions and constraints already made. Use whenever the task names a project scope, or picks or writes down a platform, provider, runtime, database, library, or other technical choice - including plain build requests like "create deployment-plan.md for the payments API", "write the config for this service", "add a Dockerfile", or "how should we deploy this". Also use when asked what has been decided, established, or chosen for a scope. Do not wait for Canon to be mentioned by name.
 version: 0.2.0
 ---
 

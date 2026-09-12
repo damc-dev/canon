@@ -19,6 +19,17 @@ TYPE_LABELS = {
 }
 TYPE_ORDER = {"constraint": 0, "decision": 1, "standard": 2, "preference": 2, "reference": 3}
 
+# Bump whenever the index schema or tokenizer changes so existing indexes are rebuilt.
+INDEX_SCHEMA_VERSION = 2
+# Function words dropped from search queries; they match nearly every document and carry no topic.
+STOP_WORDS = frozenset(
+    """
+    a an and any are as at be been but by can could did do does for from had has have how i if in
+    into is it its me my no not of on or our should so than that the their them then there these
+    they this those to us was we were what when where which while who why will with would you your
+    """.split()
+)
+
 
 @dataclass(frozen=True)
 class Document:
@@ -182,9 +193,10 @@ def rebuild_index(project_root: str | Path) -> dict[str, Any]:
                 locked INTEGER NOT NULL,
                 supersedes TEXT NOT NULL
             );
-            CREATE VIRTUAL TABLE documents_fts USING fts5(title, body);
+            CREATE VIRTUAL TABLE documents_fts USING fts5(title, body, tokenize='porter unicode61');
             """
         )
+        connection.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION}")
         for document in documents:
             cursor = connection.execute(
                 """INSERT INTO documents
@@ -227,20 +239,41 @@ def _row_to_document(row: sqlite3.Row) -> Document:
     )
 
 
-def _all_documents(project_root: Path) -> list[Document]:
-    database = index_path(project_root)
+def _index_is_current(database: Path) -> bool:
     if not database.exists():
+        return False
+    try:
+        with sqlite3.connect(database) as connection:
+            return connection.execute("PRAGMA user_version").fetchone()[0] == INDEX_SCHEMA_VERSION
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _ensure_index(project_root: Path) -> None:
+    if not _index_is_current(index_path(project_root)):
         rebuild_index(project_root)
-    with sqlite3.connect(database) as connection:
+
+
+def _all_documents(project_root: Path) -> list[Document]:
+    _ensure_index(project_root)
+    with sqlite3.connect(index_path(project_root)) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute("SELECT * FROM documents").fetchall()
     return [_row_to_document(row) for row in rows]
 
 
+def _query_terms(query: str) -> list[str]:
+    terms = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_]+", query.lower())))
+    content_terms = [term for term in terms if term not in STOP_WORDS]
+    # A query made only of stop words still searches for them rather than returning nothing.
+    return content_terms or terms
+
+
 def _fts_rowids(project_root: Path, query: str, limit: int) -> list[int]:
-    terms = re.findall(r"[A-Za-z0-9_]+", query.lower())
+    terms = _query_terms(query)
     if not terms:
         return []
+    # The porter tokenizer stems these quoted terms too, so "passwords" also matches "password".
     expression = " OR ".join(f'"{term}"' for term in terms)
     with sqlite3.connect(index_path(project_root)) as connection:
         rows = connection.execute(
@@ -308,8 +341,7 @@ def search_knowledge(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     root = Path(project_root).resolve()
-    if not index_path(root).exists():
-        rebuild_index(root)
+    _ensure_index(root)
     candidates = _documents_by_rowid(root, _fts_rowids(root, query, max(limit * 4, 40)))
     documents = effective_documents(
         root,
